@@ -1,0 +1,196 @@
+{
+  "me": {
+    "name": "Your Name",
+    "about": "who works at Forethought Research on <your work>",
+    "linear_who": "me",
+    "publication_viewer": "you@forethought.org",
+    "personal_calendar": {
+      "account": "you@example.com",
+      "calendars": [
+        "primary",
+        "your-meetings-calendar@group.calendar.google.com"
+      ]
+    }
+  },
+  "paths": {
+    "root": "/path/to/working-folder",
+    "state": "private/ft-desk",
+    "linear_tasks": "team-repo/skills/task-manager/scripts/linear-tasks",
+    "tasks_cli": ".claude/skills/task-manager/scripts/tasks",
+    "ft_hours": ".claude/skills/ft-hours/scripts/ft-hours",
+    "check_sync": "team-repo/projects/metrics-dashboard/scripts/check-sync",
+    "ft_publish": ".claude/skills/ft-publish",
+    "publication_project_js": "~/repos/forethought/ft-publish/worker/project.js",
+    "slack": "~/.agents/skills/slack/scripts/slack",
+    "slack_data": "~/.agents/skills/slack/data",
+    "signal_db": "~/Library/Application Support/SignalBridge/data/messages.sqlite",
+    "signal_health": "~/Library/Application Support/SignalBridge/data/health.json",
+    "signal_attachments": "~/Library/Application Support/SignalBridge/attachments",
+    "whatsapp_store": "~/src/whatsapp-mcp/whatsapp-bridge/store",
+    "spawn_agent_panes": "~/.agents/skills/pane/scripts/spawn_agent_panes.py",
+    "spawn_log": "~/.cache/agent-spawns/spawns.jsonl",
+    "agent_panes": "~/.local/bin/agent-panes"
+  },
+  "server": {
+    "port": 4848
+  },
+  "week_plan": {
+    "doc": "google-doc-id-1",
+    "tab": "t.0",
+    "account": "you@forethought.org"
+  },
+  "first_run_lookback_hours": 24,
+  "gmail": {
+    "account": "you@forethought.org",
+    "max": 50,
+    "inbox_scan_max": 200,
+    "noise_rules": [
+      {
+        "from": "@fireflies\\.ai$",
+        "subject": "meeting recap",
+        "reason": "Fireflies meeting recap; the meeting notes are kept elsewhere"
+      },
+      {
+        "from": "@fireflies\\.ai$",
+        "reason": "Fireflies account notice"
+      },
+      {
+        "from": "^calendar-noreply@google\\.com$",
+        "subject": "^(Accepted|Declined|Tentatively accepted)",
+        "reason": "Calendar reply notification; the response is already on the event"
+      },
+      {
+        "subject": "^(Updated invitation|Invitation)( with note)?:",
+        "reason": "Calendar invitation; ft-desk's calendar check reports unanswered invitations, and you can respond in Calendar"
+      },
+      {
+        "from": "^calendar-noreply@google\\.com$",
+        "reason": "Google Calendar notice"
+      },
+      {
+        "from": "@slack\\.com$",
+        "reason": "Slack email notification; ft-desk reads Slack directly"
+      },
+      {
+        "from": "^comments-noreply@docs\\.google\\.com$",
+        "reason": "Docs comment notification; ft-desk's Docs check reads the comment directly",
+        "covered_by": "gdocs"
+      },
+      {
+        "from": "^drive-shares-dm-noreply@google\\.com$",
+        "subject": "^Document shared with you:",
+        "reason": "Docs share notification; ft-desk's Docs check reports new shares",
+        "covered_by": "gdocs"
+      },
+      {
+        "label": "CATEGORY_PROMOTIONS",
+        "reason": "Promotional email"
+      },
+      {
+        "label": "CATEGORY_SOCIAL",
+        "reason": "Social network notification"
+      }
+    ]
+  },
+  "slack": {
+    "forethought": {
+      "scope": "all",
+      "my_user_id": "U0EXAMPLE01",
+      "url": "https://forethought-ea.slack.com/"
+    },
+    "secondws": {
+      "scope": "forethought-only",
+      "my_user_id": "U0EXAMPLE02",
+      "url": "https://second-workspace.slack.com/",
+      "channels": [
+        "C0EXAMPLE03",
+        "C0EXAMPLE04"
+      ],
+      "forethought_team_id": "T0EXAMPLE05"
+    }
+  },
+  "signal": {
+    "conversations": {
+      "group:signal-group-id": "Kit Sam Peter Alex (group)",
+      "signal-uuid-1": "Kit (DM)",
+      "signal-uuid-2": "Alex (DM)",
+      "signal-uuid-3": "Sam (DM)"
+    },
+    "people": {
+      "signal-uuid-4": "Peter",
+      "signal-uuid-5": "Peter",
+      "signal-uuid-1": "Kit Reed",
+      "signal-uuid-2": "Alex Morgan",
+      "signal-uuid-3": "Sam Lee"
+    },
+    "sam_dm": "signal-uuid-3"
+  },
+  "sam": {
+    "slack_workspace": "forethought",
+    "slack_user_id": "U0EXAMPLE06",
+    "slack_channels": {
+      "D0EXAMPLE07": "Slack DM"
+    }
+  },
+  "whatsapp": {
+    "chats": [
+      {
+        "label": "Team group",
+        "jid": "whatsapp-jid-1@g.us"
+      },
+      {
+        "label": "Dana (DM)",
+        "jid": "whatsapp-jid-2@lid"
+      }
+    ]
+  },
+  "gdocs": {
+    "account": "you@forethought.org",
+    "my_emails": [
+      "you@forethought.org",
+      "you@example.com"
+    ],
+    "lookback_days": 30,
+    "max_candidates": 400,
+    "workers": 8,
+    "watch": [
+      {
+        "label": "A doc whose every new comment you want to see (1)",
+        "id": "google-doc-id-2"
+      },
+      {
+        "label": "A doc whose every new comment you want to see (2)",
+        "id": "google-doc-id-3"
+      }
+    ]
+  },
+  "calendar": {
+    "account": "you@forethought.org",
+    "calendar_id": "primary",
+    "invite_reminder_days": 21,
+    "auto_decline_groups": [
+      "meetings-group@example.org",
+      "another-group@example.org"
+    ]
+  },
+  "judge": {
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "keychain": "forethought-desk-judge",
+    "key_name": "ft-desk judge (Your Name)"
+  },
+  "vips": [
+    "Alex Morgan",
+    "Kit Reed",
+    "Noor Park",
+    "Dana Cole"
+  ],
+  "repos": [
+    ".",
+    "team-repo",
+    "shared"
+  ],
+  "my_git_names": [
+    "Your Name"
+  ]
+}

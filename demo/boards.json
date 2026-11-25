@@ -1,0 +1,21 @@
+{
+ "areas": [
+  {"slug": "team-uplift", "name": "Team uplift", "role": "Engineering", "owner": "Peter"},
+  {"slug": "infrastructure", "name": "Infrastructure", "role": "Engineering", "owner": "Peter"},
+  {"slug": "distribution", "name": "Distribution", "role": "Communications", "owner": "Peter"}
+ ],
+ "boards": [
+  {"name": "Research desk", "slug": "research-desk", "area": "team-uplift", "kind": "project", "parent": null, "id": "p-research-desk", "url": "https://linear.app/example/project/research-desk", "status": "Active", "owner": "Peter", "collaborators": ["Sam"], "mine": true,
+   "now": "Kit is trying the reading-list view on two live questions (AS-231)", "next": "Turn Kit's notes into the next round of fixes (AS-233); demo to the research team on Friday (AS-236)", "risk": "Kit has two hours a week for this; if the trial slips, Friday's demo shows old work"},
+  {"name": "Shared tooling", "slug": "shared-tooling", "area": "team-uplift", "kind": "project", "parent": null, "id": "p-shared-tooling", "url": "https://linear.app/example/project/shared-tooling", "status": "Active", "owner": "Peter", "collaborators": [], "mine": true,
+   "now": "Comment bot answers in six docs; three people asked for it in theirs (AS-220)", "next": "Write the how-to so people can add it themselves (AS-224)", "risk": "None this week"},
+  {"name": "Research corpus", "slug": "research-corpus", "area": "team-uplift", "kind": "project", "parent": null, "id": "p-corpus", "url": "https://linear.app/example/project/research-corpus", "status": "Active", "owner": "Sam", "collaborators": [], "mine": false, "now": "", "next": "", "risk": ""},
+  {"name": "Team metrics", "slug": "metrics", "area": "infrastructure", "kind": "responsibility", "parent": null, "id": "p-metrics", "url": "https://linear.app/example/project/metrics", "status": "Active", "owner": "Peter", "collaborators": [], "mine": true,
+   "now": "All sources synced this morning", "next": "Monthly spend check on 1 Dec (AS-240)", "risk": ""},
+  {"name": "Publication desk", "slug": "publication-desk", "area": "distribution", "kind": "responsibility", "parent": null, "id": "p-publication-desk", "url": "https://linear.app/example/project/publication-desk", "status": "Active", "owner": "Peter", "collaborators": [], "mine": true,
+   "now": "Two pieces in review, one scheduled for Thursday", "next": "Chase review of the compute essay (AS-251)", "risk": "Reviewer away next week"},
+  {"name": "Newsletter relaunch", "slug": "newsletter", "area": "distribution", "kind": "project", "parent": null, "id": "p-newsletter", "url": "https://linear.app/example/project/newsletter", "status": "Active", "owner": "Peter", "collaborators": ["Dana"], "mine": true,
+   "now": "Template agreed (AS-260)", "next": "Draft the first issue (AS-262)", "risk": ""},
+  {"name": "Podcast feed", "slug": "podcast", "area": "distribution", "kind": "project", "parent": null, "id": "p-podcast", "url": "https://linear.app/example/project/podcast", "status": "Paused", "owner": "Peter", "collaborators": [], "mine": true, "now": "", "next": "", "risk": ""}
+ ]
+}

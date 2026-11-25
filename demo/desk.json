@@ -1,0 +1,89 @@
+{
+  "date": "2026-11-24",
+  "header": {"title": "Tue 24 Nov 12:05", "since": "Since 08:40", "counts": {"urgent": 2, "new": 9, "open": 2}},
+  "projects": [
+    {"name": "Research desk", "id": "p-research-desk", "now": "Kit is trying the reading-list view on two live questions (AS-231)", "next": "Turn Kit's notes into the next round of fixes (AS-233); demo to the research team on Friday (AS-236)", "risk": "Kit has two hours a week for this; if the trial slips, Friday's demo shows old work"},
+    {"name": "Shared tooling", "id": "p-shared-tooling", "now": "Comment bot answers in six docs; three people asked for it in theirs (AS-220)", "next": "Write the how-to so people can add it themselves (AS-224)", "risk": "None this week"},
+    {"name": "Team metrics", "id": "p-metrics", "now": "All sources synced this morning", "next": "Monthly spend check on 1 Dec (AS-240)", "risk": ""},
+    {"name": "Publication desk", "id": "p-publication-desk", "now": "Two pieces in review, one scheduled for Thursday", "next": "Chase review of the compute essay (AS-251)", "risk": "Reviewer away next week"},
+    {"name": "Newsletter relaunch", "id": "p-newsletter", "now": "Template agreed (AS-260)", "next": "Draft the first issue (AS-262)", "risk": ""}
+  ],
+  "sections": [
+    {"id": "urgent", "title": "Urgent", "groups": [{"items": [
+      {"n": 1, "key": "docs:demo-1", "source": "docs", "head": "Kit Reed, Google Doc comment:", "link": "https://docs.google.com/document/d/demo/edit", "text": "asks you to decide by tomorrow whether the AI tools survey goes to all staff or only researchers, in the Survey plan doc.", "time": "10:42", "title": "Survey audience", "context": "Kit Reed asked in a comment on the Survey plan doc whether the AI tools survey should go to all staff or only researchers, and needs an answer by Wednesday."},
+      {"n": 2, "key": "slack:demo-2", "source": "slack", "source_label": "Slack DM", "head": "Alex, Slack DM:", "link": "https://example.slack.com/archives/D0EXAMPLE/p1", "text": "wants the one-page summary of the October pilot before Thursday's leadership meeting; you said you'd send it today.", "pill": {"kind": "today", "text": "Due today"}, "title": "Pilot summary", "context": "Alex Morgan asked for a one-page summary of the October pilot before Thursday's leadership meeting. Peter said he would send it today."}
+    ]}]},
+    {"id": "slack-todos", "title": "Slack to-dos", "nav": "To-dos", "groups": [{"items": [
+      {"n": 3, "key": "todo:demo-3", "source": "slack", "source_label": "Slack to-do", "head": "Noor, #research-tools:", "link": "https://example.slack.com/archives/C0EXAMPLE/p2", "text": "asked for a walkthrough of the literature-search skill; no reply yet.", "pill": {"kind": "over", "text": "Overdue 2 days"}, "due": "2026-11-22"},
+      {"n": 4, "key": "todo:demo-4", "source": "slack", "source_label": "Slack to-do", "head": "Dana, #ops:", "link": "https://example.slack.com/archives/C0EXAMPLE/p3", "text": "wants next quarter's compute budget line.", "pill": {"kind": "later", "text": "Due Fri"}, "due": "2026-11-27"}
+    ]}]},
+    {"id": "new", "title": "New", "groups": [
+      {"label": "Email", "items": [
+        {"n": 5, "key": "email:demo-5", "source": "email", "head": "Workshop organisers, Email:", "link": "https://mail.google.com/mail/u/0/#all/demo5", "text": "asks whether you'll present on 9 Dec; the form closes Friday.", "time": "09:12"},
+        {"n": 6, "key": "email:demo-6", "source": "email", "head": "Sam, Email:", "link": "https://mail.google.com/mail/u/0/#all/demo6", "text": "forwarded a quote for meeting transcription. FYI; no reply needed.", "time": "08:55"}
+      ]},
+      {"label": "Slack", "items": [
+        {"n": 7, "key": "slack:demo-7", "source": "slack", "source_label": "#using-ai", "head": "#using-ai:", "link": "https://example.slack.com/archives/C0EXAMPLE/p4", "text": "three people asked how to connect Claude to Google Drive; Sam answered two, one is still open.", "time": "11:30"},
+        {"n": 8, "key": "slack:demo-8", "source": "slack", "source_label": "Slack DM", "head": "Kit, Slack DM:", "link": "https://example.slack.com/archives/D0EXAMPLE/p5", "text": "shared a draft prompt for critique rounds and asks for comments, no rush.", "time": "10:05"}
+      ]},
+      {"label": "Signal", "items": [
+        {"n": 9, "key": "signal:demo-9", "source": "signal", "head": "Alex (DM), Signal:", "text": "running ten minutes late to the 14:00 call.", "time": "11:58"}
+      ]},
+      {"label": "Docs", "items": [
+        {"n": 10, "key": "docs:demo-10", "source": "docs", "head": "Noor Park, 3 comments on Research desk notes:", "link": "https://docs.google.com/document/d/demo2/edit", "text": "two questions about the reading-list format ([1](https://docs.google.com/document/d/demo2/edit), [2](https://docs.google.com/document/d/demo2/edit)); the third is answered.", "time": "Mon 17:20"}
+      ]},
+      {"label": "Linear", "items": [
+        {"n": 11, "key": "linear:demo-11", "source": "linear", "source_label": "Research desk", "head": "AS-229 Reading-list export:", "link": "https://linear.app/example/issue/AS-229", "text": "Sam closed it: the export now keeps each source's notes.", "time": "09:40"}
+      ]},
+      {"label": "Calendar", "items": [
+        {"n": 12, "key": "cal:demo-12", "source": "cal", "head": "New invitation:", "text": "Reading group, Thu 3 Dec 15:00–16:00, from Dana; room on the second floor.", "time": "08:41"}
+      ]}
+    ]},
+    {"id": "unassigned", "title": "Unassigned tasks", "nav": "Unassigned", "groups": [{"items": [
+      {"n": 13, "key": "linear:demo-13", "source": "linear", "source_label": "Shared tooling", "head": "AS-226", "link": "https://linear.app/example/issue/AS-226", "text": "Decide whether to keep the old transcript archive.", "pill": {"kind": "later", "text": "Due 4 Dec"}},
+      {"n": 14, "key": "linear:demo-14", "source": "linear", "source_label": "Newsletter relaunch", "head": "AS-263", "link": "https://linear.app/example/issue/AS-263", "text": "Pick a sending day for the newsletter."}
+    ]}]},
+    {"id": "still-open", "title": "Still open", "groups": [{"items": [
+      {"n": 15, "key": "email:demo-15", "source": "email", "head": "Kit, Email:", "link": "https://mail.google.com/mail/u/0/#all/demo15", "text": "feedback on the essay outline; you said you'd reply this week.", "time": "Fri"}
+    ]}]},
+    {"id": "archive", "title": "Archive as noise?", "nav": "Archive", "groups": [{"items": [
+      {"n": 16, "key": "email:demo-16", "source": "email", "head": "Google Calendar:", "text": "Accepted: Reading group. Calendar reply notification; the response is already on the event."},
+      {"n": 17, "key": "email:demo-17", "source": "email", "head": "A conference newsletter:", "text": "Promotional email."}
+    ]}]},
+    {"id": "declined", "title": "Declined automatically", "nav": "Declined", "groups": [{"items": [
+      {"n": 18, "key": "cal:demo-18", "source": "cal", "head": "Research meeting (weekly):", "text": "declined; the invitation reached you through the research-meetings group."}
+    ]}]}
+  ],
+  "day_plan": {
+    "days": [
+      {"label": "Today", "date": "Tue 24 Nov", "now": "12:05",
+       "events": [{"start": "09:30", "end": "09:45", "label": "Stand-up"},
+                  {"start": "14:00", "end": "14:30", "label": "Call with Alex", "n": 9},
+                  {"start": "15:30", "end": "17:30", "label": "Trial with Kit"}],
+       "due": [{"n": 2, "text": "Pilot summary for Alex", "status": "Due today", "warn": true},
+               {"id": "AS-233", "text": "Fixes from Kit's notes", "status": "Due today", "warn": true}]},
+      {"label": "Tomorrow", "date": "Wed 25 Nov",
+       "events": [{"start": "10:00", "end": "11:00", "label": "Team meeting"}],
+       "due": [{"n": 1, "text": "Survey audience decision", "status": "Due tomorrow"}]}
+    ],
+    "later": [{"when": "Fri 27 Nov", "id": "AS-236", "text": "Research desk demo"}]
+  },
+  "week_plan": {
+    "url": "https://docs.google.com/document/d/demo-week/edit",
+    "weeks": [{"title": "2026W48 (week of 23 Nov)", "heading": "", "people": [
+      {"name": "Peter", "blocks": [
+        {"runs": [{"t": "[2 days] Research desk", "b": true}]},
+        {"level": 0, "runs": [{"t": "Run the reading-list trial with Kit"}]},
+        {"level": 0, "runs": [{"t": "Demo to the research team on Friday"}]},
+        {"runs": [{"t": "[1 day] Shared tooling", "b": true}]},
+        {"level": 0, "runs": [{"t": "How-to for the comment bot"}]},
+        {"runs": [{"t": "[1 day] Publication", "b": true}]},
+        {"level": 0, "runs": [{"t": "Get the compute essay through review"}]}
+      ]},
+      {"name": "Sam", "blocks": [
+        {"level": 0, "runs": [{"t": "Corpus refresh and reading-list export"}]}
+      ]}
+    ]}]
+  },
+  "checked": [{"text": "email 6 new, 2 noise"}, {"text": "Slack 2 workspaces"}, {"text": "Signal, WhatsApp"}, {"text": "Docs 14 files"}, {"text": "Linear"}, {"text": "calendar"}, {"text": "Metrics sync ok"}]
+}

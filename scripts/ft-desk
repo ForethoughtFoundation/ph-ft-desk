@@ -1,0 +1,1468 @@
+#!/usr/bin/env python3
+"""Forethought desk: gather what is new across Peter's Forethought channels.
+
+  ft-desk gather [--mode standalone|briefing] [--since WHEN]
+      Read every source in parallel and print one JSON document. Read-only on
+      every source: nothing is marked read, nothing is sent.
+  ft-desk commit
+      Advance each source's watermark to the start of the last gather, for the
+      sources that succeeded. Run it last, once the gather has been presented
+      and its open items recorded with `items add`.
+      Refused after a briefing-mode gather.
+  ft-desk items [list]
+  ft-desk items add KEY SUMMARY [--source S] [--link URL]
+  ft-desk items done KEY...
+  ft-desk items snooze KEY UNTIL     UNTIL is 2h, 30m, 1d or an ISO datetime
+  ft-desk file-attachment PATH --sender NAME [--date YYYY-MM-DD]
+      Move a saved attachment into inbox/files/. Archives get their own folder
+      and their contents are listed, never extracted or run.
+  ft-desk archive THREAD_ID... [--judged]
+      Archive Gmail threads (remove the INBOX label). Only threads in the last
+      gather's noise list, unless --judged: Peter approved a thread the model
+      proposed as noise.
+  ft-desk keep THREAD_ID...
+      Never offer these threads as noise again.
+  ft-desk ignore-invite cal-invite:SERIES_ID...
+      Never flag these unanswered calendar invitations again.
+  ft-desk decline-invites
+      Decline the invitations the last standalone gather listed in the calendar
+      source's to_decline: unanswered events that reach Peter through a group
+      in calendar.auto_decline_groups. Refused after a briefing-mode gather.
+  ft-desk undo-decline EVENT_ID... [--status accepted|tentative|needsAction]
+      Reset an auto-declined event (default needsAction) and never decline it again.
+  ft-desk sam [--since WHEN | --last N]
+      Sam's messages to Peter (Signal DM, Slack DM)
+      since /sam last marked them handled (or his last N in each), in full, with
+      the conversation leading up to them. Files kept Signal attachments.
+  ft-desk sam-commit
+      Mark the messages from the last `sam` run handled. The desk then skips
+      them.
+  ft-desk publication
+      Fetch the publication pipeline from publish.example.org and write
+      what needs Peter, what is with others and two weeks of target dates to
+      desk/publication.json, which the desk page shows under its header.
+
+A standalone gather files Signal attachments the bridge kept into
+inbox/files/ and adds a row for each to inbox/README.md.
+
+State lives in private/ft-desk/ (gitignored, synced between machines).
+WHEN for --since is an ISO datetime, a date, or a duration such as 6h.
+"""
+
+import argparse
+import concurrent.futures as cf
+import contextlib
+import fcntl
+import json
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import zipfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from desk_config import CONFIG, ROOT, STATE_DIR, PUBLICATION_VIEWER, SKILL as SKILL_DIR, path as cfg_path  # noqa: E402
+from desk_store import DIR as STORE_DIR  # noqa: E402  not synced, so the lock file stays this machine's
+STATE_FILE = STATE_DIR / "state.json"
+STATE_LOCK = STORE_DIR / "state.lock"
+LAST_GATHER = STATE_DIR / "last-gather.json"
+INBOX = ROOT / "inbox"
+SAM_STATE = STATE_DIR / "sam.json"
+GDOCS_STATE = STATE_DIR / "gdocs.json"
+SAM_DM = CONFIG["signal"]["sam_dm"]
+SAM = CONFIG["sam"]
+
+SLACK = str(cfg_path("slack"))
+SLACK_DATA = cfg_path("slack_data")
+LINEAR_TASKS = cfg_path("tasks_cli")
+SIGNAL_DB = str(cfg_path("signal_db"))          # these four are read on an always-on Mac over SSH
+SIGNAL_HEALTH = str(cfg_path("signal_health"))
+WA_DIR = str(cfg_path("whatsapp_store"))
+SIGNAL_KEEP_DIR = str(cfg_path("signal_attachments")) + "/"
+KEPT_NAME = re.compile(r"^[0-9]+--[0-9-]+--[A-Za-z0-9._-]+$")
+GMAIL_THREAD_ID = re.compile(r"^[0-9a-f]{8,32}$")
+
+TEXT_LEN = 800
+SLACK_HISTORY_LIMIT = 100
+SLACK_LOOKBACK_DAYS = 14       # parents older than this are not checked for new replies
+SLACK_THREADS_PER_WS = 50      # bounded replies fetches per workspace, channels only
+SIGNAL_LIMIT = 300
+SIGNAL_BODY_LEN = 1500
+GDOC_THREAD_TAIL = 6   # messages kept per Docs comment thread; the desk service's collector raises these
+GDOC_TEXT_LEN = 600
+SAM_SCAN = 80       # recent DM messages read per /sam gather
+SAM_CONTEXT = 12    # earlier DM messages shown before the first new one
+SLACK_EVENT_SUBTYPES = {"channel_join", "channel_leave", "channel_topic", "channel_purpose",
+                        "channel_name", "channel_archive", "channel_unarchive", "pinned_item"}
+INVITE_LOOKAHEAD_DAYS = 365   # how far ahead to look for unanswered invitations
+SIGNAL_ID = re.compile(r"^(group:[A-Za-z0-9+/=]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+WA_JID = re.compile(r"^[0-9]+@(g\.us|lid|s\.whatsapp\.net)$")
+SAFE_PREFIX = re.compile(r"^[A-Za-z0-9 .,-]+$")
+
+
+# --- helpers ---------------------------------------------------------------
+
+def now():
+    return datetime.now().astimezone()
+
+
+def local_iso(epoch):
+    return datetime.fromtimestamp(float(epoch)).astimezone().isoformat(timespec="minutes")
+
+
+def run(cmd, timeout=90, stdin=None):
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=stdin)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{Path(cmd[0]).name} exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:400]}")
+    return proc.stdout
+
+
+def run_json(cmd, timeout=90, stdin=None):
+    out = run(cmd, timeout, stdin).strip()
+    return json.loads(out) if out else []
+
+
+def slack_json(ws, *args):
+    """The slack client exits 0 on API errors such as invalid_auth; treat ok: false as a failure,
+    so an expired token marks the source as errored instead of reporting an empty workspace."""
+    res = run_json([SLACK, "-w", ws, *args])
+    if isinstance(res, dict) and res.get("ok") is False:
+        raise RuntimeError(f"slack {args[0]} ({ws}): {res.get('error') or 'ok: false'}")
+    return res
+
+
+def clip(text, n=None):
+    if text is None:
+        return None
+    n = TEXT_LEN if n is None else n  # read at call time: the desk service raises TEXT_LEN for the judge
+    return text if len(text) <= n else text[:n] + "…"
+
+
+def parse_when(value):
+    """ISO datetime, date or duration (6h, 30m, 2d) → aware datetime."""
+    m = re.fullmatch(r"(\d+)\s*([mhd])", value.strip())
+    if m:
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[m.group(2)]
+        return now() - timedelta(**{unit: int(m.group(1))})
+    dt = datetime.fromisoformat(value)
+    return dt.astimezone() if dt.tzinfo else dt.replace(tzinfo=now().tzinfo)
+
+
+def parse_until(value):
+    m = re.fullmatch(r"(\d+)\s*([mhd])", value.strip())
+    if m:
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[m.group(2)]
+        return now() + timedelta(**{unit: int(m.group(1))})
+    return parse_when(value)
+
+
+@contextlib.contextmanager
+def state_lock():
+    """Held by every command that changes state.json, from its load to its save. The page's buttons
+    (Archive, Keep) run `items` while a refresh runs `gather` and `commit`; without it, one command's
+    save drops the other's changes."""
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_LOCK, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def load_state():
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    return {"watermarks": {}, "items": {}}
+
+
+def load_sam_state():
+    if SAM_STATE.exists():
+        return json.loads(SAM_STATE.read_text())
+    return {}
+
+
+def save_sam_state(pstate):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SAM_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(pstate, indent=2))
+    tmp.replace(SAM_STATE)
+
+
+def save_state(state):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    tmp.replace(STATE_FILE)
+
+
+# --- sources ---------------------------------------------------------------
+
+def src_gmail(wm):
+    acct = CONFIG["gmail"]["account"]
+    after = int(wm)
+
+    def search(query, n):
+        data = run_json(["gog", "--json", "gmail", "search", query, "--account", acct, "--max", str(n)])
+        return data.get("threads") or []
+
+    def row(t):
+        return {
+            "key": f"gmail:{t['id']}",
+            "thread_id": t["id"],
+            "date": t.get("date"),
+            "from": t.get("from"),
+            "subject": t.get("subject"),
+            "unread": "UNREAD" in (t.get("labels") or []),
+            "messages": t.get("messageCount"),
+            "labels": [l for l in (t.get("labels") or []) if l not in ("INBOX", "UNREAD")],
+        }
+
+    inbox = search(f"in:inbox after:{after}", CONFIG["gmail"]["max"])
+    whole_inbox = search("in:inbox", CONFIG["gmail"]["inbox_scan_max"])
+    sent = search(f"in:sent after:{after}", 30)
+    kept = set(load_state().get("noise_kept", []))
+    new_ids = {t["id"] for t in inbox}
+    noise = []
+    for t in whole_inbox:
+        rule = noise_rule(t)
+        if rule and t["id"] not in kept:
+            n = dict(row(t), reason=rule["reason"])
+            if rule.get("covered_by"):
+                n.update(covered_by=rule["covered_by"], new=t["id"] in new_ids)
+            noise.append(n)
+    items = [row(t) for t in inbox if t["id"] in kept or not noise_rule(t)]  # a kept thread is never noise again
+    sent_rows = [{"thread_id": t["id"], "date": t.get("date"), "to_subject": t.get("subject")} for t in sent]
+    return {"items": items, "noise": noise, "inbox_total": len(whole_inbox),
+            "inbox_scan_truncated": len(whole_inbox) >= CONFIG["gmail"]["inbox_scan_max"],
+            "sent_by_peter": sent_rows,
+            "read_body": f"gog --json gmail thread get <thread_id> --account {acct}"}
+
+
+def sender_address(value):
+    m = re.search(r"<([^>]+)>", value or "")
+    return (m.group(1) if m else (value or "")).strip().lower()
+
+
+def noise_rule(thread):
+    """The first noise rule a thread matches, or None."""
+    address = sender_address(thread.get("from"))
+    subject = thread.get("subject") or ""
+    labels = thread.get("labels") or []
+    for rule in CONFIG["gmail"]["noise_rules"]:
+        if "from" in rule and not re.search(rule["from"], address, re.I):
+            continue
+        if "subject" in rule and not re.search(rule["subject"], subject, re.I):
+            continue
+        if "label" in rule and rule["label"] not in labels:
+            continue
+        return rule
+    return None
+
+
+def slack_cache_names(ws):
+    path = SLACK_DATA / f"slack-cache-{ws}.json"
+    if not path.exists():
+        return {}
+    users = json.loads(path.read_text()).get("users") or {}
+    return {uid: (u.get("real_name") or u.get("display_name") or u.get("username")) for uid, u in users.items()}
+
+
+def src_slack(ws, wm):
+    cfg = CONFIG["slack"][ws]
+    me = cfg["my_user_id"]
+    only_ft = cfg["scope"] == "forethought-only"
+    ft_team = cfg.get("forethought_team_id")
+    names = slack_cache_names(ws)
+
+    counts = slack_json(ws, "counts")
+    listing = slack_json(ws, "channels", "public_channel,private_channel,mpim,im")
+    chans = {c["id"]: c for c in listing.get("channels") or []}
+
+    def active(c):
+        return max(float(c.get("latest") or 0), float(c.get("updated") or 0)) > wm
+
+    candidates = []
+    for kind in ("channels", "mpims", "ims"):
+        for c in counts.get(kind) or []:
+            if not active(c):
+                continue
+            if only_ft and kind == "channels" and c["id"] not in cfg.get("channels", []):
+                continue
+            candidates.append((kind, c["id"]))
+
+    def name_of(uid, msg=None):
+        prof = (msg or {}).get("user_profile") or {}
+        return prof.get("real_name") or names.get(uid) or uid
+
+    def conv_name(kind, cid):
+        c = chans.get(cid) or {}
+        if kind == "ims":
+            return "DM with " + str(name_of(c.get("user")) if c.get("user") else cid)
+        return "#" + (c.get("name") or cid)
+
+    def readable(text):
+        return re.sub(r"<@([A-Z0-9]+)>", lambda m: "@" + str(names.get(m.group(1), m.group(1))), text or "")
+
+    oldest = str(max(wm - SLACK_LOOKBACK_DAYS * 86400, 0))
+    thread_budget = [SLACK_THREADS_PER_WS]
+
+    def fetch(kind, cid):
+        hist = slack_json(ws, "history", cid, str(SLACK_HISTORY_LIMIT), "--oldest", oldest)
+        msgs = hist.get("messages") if isinstance(hist, dict) else hist
+        msgs = msgs or []
+        if only_ft and kind != "channels":
+            if not any(m.get("user_team") == ft_team for m in msgs):
+                return None
+        parent_text = {m["ts"]: clip(readable(m.get("text")), 200) for m in msgs}
+        rows = {}
+        for m in msgs:
+            if float(m["ts"]) > wm:
+                # A reply also sent to the conversation (thread_broadcast) is listed
+                # top-level; tie it to its thread so it isn't read as a fresh message.
+                if m.get("thread_ts") and m["thread_ts"] != m["ts"]:
+                    m["_parent_text"] = parent_text.get(m["thread_ts"], "(earlier thread)")
+                rows[m["ts"]] = m
+        truncated = []
+        for parent in msgs:
+            if float(parent.get("latest_reply") or 0) <= wm or not parent.get("reply_count"):
+                continue
+            # DMs and group DMs are where replies to Peter land, so their threads
+            # are always fetched; only channels share the budget.
+            if kind == "channels":
+                if thread_budget[0] <= 0:
+                    truncated.append(parent["ts"])
+                    continue
+                thread_budget[0] -= 1
+            rep = slack_json(ws, "replies", cid, parent["ts"])
+            replies = rep.get("messages") if isinstance(rep, dict) else rep
+            for r in replies or []:
+                if r["ts"] != parent["ts"] and float(r["ts"]) > wm:
+                    r["_parent_text"] = parent_text[parent["ts"]]
+                    rows[r["ts"]] = r
+        rows = list(rows.values())
+        if not rows:
+            return None
+        sam_handled_ts = load_sam_state().get("slack", {})
+        out = []
+        for m in sorted(rows, key=lambda m: float(m["ts"])):
+            uid = m.get("user") or m.get("bot_id")
+            if ws == SAM["slack_workspace"] and uid == SAM["slack_user_id"] \
+                    and float(m["ts"]) <= sam_handled_ts.get(cid, 0):
+                continue  # /sam has already dealt with it
+            out.append({
+                "key": f"slack:{ws}:{cid}:{m['ts']}",
+                "time": local_iso(m["ts"]),
+                "author": name_of(uid, m),
+                "is_from_me": uid == me,
+                "mentions_me": f"<@{me}>" in (m.get("text") or ""),
+                "text": clip(readable(m.get("text"))),
+                "files": [f.get("name") for f in m.get("files") or []] or None,
+                "in_thread_of": m.get("_parent_text"),
+                "thread_ts": m.get("thread_ts"),
+                "link": f"{cfg['url']}archives/{cid}/p{m['ts'].replace('.', '')}",
+            })
+        if not out:
+            return None
+        return {"conversation": conv_name(kind, cid), "channel_id": cid, "kind": kind[:-1],
+                "messages": out, "threads_not_fetched": truncated or None}
+
+    convs = []
+    with cf.ThreadPoolExecutor(max_workers=6) as pool:
+        for res in pool.map(lambda kc: fetch(*kc), candidates):
+            if res:
+                convs.append(res)
+    n = sum(len(c["messages"]) for c in convs)
+    return {"items": convs, "message_count": n, "conversations_checked": len(candidates)}
+
+
+def src_slack_todos(_wm):
+    """Every in-progress item on Peter's Slack To-dos list, whatever its age, so none is forgotten.
+    In the second workspace, only to-dos in the Forethought channels or from Forethought people."""
+    started = now().timestamp()
+    seen, rows, errors = set(), [], {}
+    for ws, cfg in CONFIG["slack"].items():
+        try:
+            saved = slack_json(ws, "todos").get("saved_items") or []
+        except Exception as exc:
+            errors[ws] = str(exc)[:300]
+            continue
+        names = slack_cache_names(ws)
+
+        def one(item, ws=ws, cfg=cfg, names=names):
+            cid, ts = item["item_id"], item["ts"]
+            try:
+                msgs = slack_json(ws, "replies", cid, ts).get("messages") or []
+            except RuntimeError:
+                msgs = []  # deleted message or a channel Peter has left
+            msg = next((m for m in msgs if m.get("ts") == ts), None)
+            if cfg["scope"] == "forethought-only" and cid not in cfg.get("channels", []) \
+                    and not any(m.get("user_team") == cfg["forethought_team_id"] for m in msgs):
+                return None
+            try:
+                info = slack_json(ws, "info", cid).get("channel") or {}
+            except RuntimeError:
+                info = {}
+            if info.get("is_im"):
+                conv = "DM with " + str(names.get(info.get("user"), info.get("user")))
+            elif info.get("is_mpim"):
+                conv = "Group DM " + re.sub(r"^mpdm-|-\d+$", "", info.get("name") or cid).replace("--", ", ")
+            else:
+                conv = "#" + (info.get("name") or cid)
+            uid = (msg or {}).get("user") or (msg or {}).get("bot_id")
+            due = item.get("date_due") or 0
+            snoozed = item.get("date_snoozed_until") or 0
+            return {
+                "key": f"slack-todo:{ws}:{cid}:{ts}",
+                "workspace": ws,
+                "conversation": conv,
+                "author": str(names.get(uid, uid)) if msg else None,
+                "is_from_me": uid == cfg["my_user_id"],
+                "text": clip(re.sub(r"<@([A-Z0-9]+)>", lambda m: "@" + str(names.get(m.group(1), m.group(1))),
+                                    (msg or {}).get("text") or ""), 400) if msg else "(message not readable)",
+                "saved_at": local_iso(item["date_created"]),
+                "due": local_iso(due) if due else None,
+                "overdue": bool(due) and due < started,
+                "snoozed_until": local_iso(snoozed) if snoozed > started else None,
+                "peter_replied_after": any(m.get("user") == cfg["my_user_id"] and float(m["ts"]) > float(ts)
+                                           for m in msgs),
+                "link": f"{cfg['url']}archives/{cid}/p{ts.replace('.', '')}",
+            }
+
+        fresh = [i for i in saved if (i["item_id"], i["ts"]) not in seen]
+        seen.update((i["item_id"], i["ts"]) for i in fresh)
+        with cf.ThreadPoolExecutor(max_workers=6) as pool:
+            for res in pool.map(one, fresh):
+                if res:
+                    rows.append(res)
+    if errors and not rows and len(errors) == len(CONFIG["slack"]):
+        raise RuntimeError("; ".join(f"{ws}: {e}" for ws, e in errors.items()))
+    rows.sort(key=lambda r: (r["due"] is None, r["due"] or ""))
+    return {"items": rows, "overdue_count": sum(r["overdue"] for r in rows),
+            "workspace_errors": errors or None}
+
+
+def ssh_sqlite(db, sql, timeout=40):
+    return run_json(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "bridge-host",
+                     f"/usr/bin/sqlite3 -readonly -json '{db}'"], timeout=timeout, stdin=sql)
+
+
+def src_signal(wm):
+    convs = CONFIG["signal"]["conversations"]
+    people = CONFIG["signal"]["people"]
+    for cid in list(convs) + list(people):
+        if not SIGNAL_ID.match(cid):
+            raise ValueError(f"config has a malformed Signal ID: {cid!r}")
+    params = "\n".join(f".parameter set :c{i} '{cid}'" for i, cid in enumerate(convs))
+    placeholders = ",".join(f":c{i}" for i in range(len(convs)))
+    sql = f""".bail on
+.parameter init
+.parameter set :from {int(wm * 1000)}
+{params}
+PRAGMA query_only=ON;
+SELECT account_id, conversation_id, author_id, is_from_me, sent_at_ms, body,
+       unavailable_content, reply_author_id, reply_sent_at_ms, attachments_json,
+       reactions_json, peter_reacted, sent_by_agent
+FROM messages_with_reactions
+WHERE sent_at_ms > :from AND conversation_id IN ({placeholders})
+ORDER BY sent_at_ms LIMIT {SIGNAL_LIMIT};
+"""
+    rows = ssh_sqlite(SIGNAL_DB, sql)
+    health = run_json(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "bridge-host",
+                       f"/usr/bin/jq -c '{{capture_state, last_received_event_at_ms}}' '{SIGNAL_HEALTH}'"])
+    handled_ms = load_sam_state().get("watermark_ms", 0)
+    items = []
+    for r in rows:
+        if r.get("unavailable_content") == "reaction" and not r.get("body"):
+            continue  # the reaction itself shows on its target message
+        if r["conversation_id"] == SAM_DM and r["sent_at_ms"] <= handled_ms:
+            continue  # /sam has already dealt with it
+        items.append(signal_item(r, convs, people))
+    return {"items": items, "bridge_health": health,
+            "truncated": len(rows) >= SIGNAL_LIMIT}
+
+
+def signal_item(r, convs, people, body_len=None):
+    body_len = SIGNAL_BODY_LEN if body_len is None else body_len
+    atts = json.loads(r.get("attachments_json") or "[]")
+    return {
+        "key": f"signal:{r['conversation_id']}:{r['author_id']}:{r['sent_at_ms']}",
+        "conversation_id": r["conversation_id"],
+        "conversation": convs[r["conversation_id"]],
+        "author_id": r["author_id"],
+        "author": people.get(r["author_id"], f"unresolved Signal ID {r['author_id']}"),
+        "is_from_me": bool(r["is_from_me"]),
+        "time": local_iso(r["sent_at_ms"] / 1000),
+        "sent_at_ms": r["sent_at_ms"],
+        "body": clip(r.get("body"), body_len) if body_len else r.get("body"),
+        "unavailable_content": r.get("unavailable_content"),
+        "reply_to": people.get(r.get("reply_author_id")) if r.get("reply_author_id") else None,
+        "reactions": [{"by": people.get(x["reactor_id"], f"unresolved Signal ID {x['reactor_id']}"),
+                       "is_from_me": bool(x["is_from_me"]), "by_agent": bool(x.get("by_agent")),
+                       "emoji": x["emoji"]}
+                      for x in json.loads(r.get("reactions_json") or "[]")] or None,
+        "peter_reacted": bool(r.get("peter_reacted")),
+        "sent_by_agent": bool(r.get("sent_by_agent")),
+        "attachments": [{k: a.get(k) for k in ("filename", "content_type", "size_bytes",
+                                                "download_status", "stored_path") if k in a}
+                        for a in atts] or None,
+    }
+
+
+def src_whatsapp(wm):
+    since = datetime.fromtimestamp(wm, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    out = []
+    for g in CONFIG["whatsapp"]["chats"]:
+        if g.get("jid"):
+            if not WA_JID.match(g["jid"]):
+                raise ValueError(f"config has a malformed WhatsApp JID: {g['jid']!r}")
+            match = ".parameter set :jid '%s'\n" % g["jid"]
+            where = "c.jid = :jid"
+        else:
+            if not SAFE_PREFIX.match(g["name_prefix"]):
+                raise ValueError(f"config name_prefix has unexpected characters: {g['name_prefix']!r}")
+            match = ".parameter set :prefix '%s'\n" % g["name_prefix"]
+            where = "c.name LIKE :prefix || '%'"
+        sql = f""".bail on
+ATTACH '{WA_DIR}/whatsapp.db' AS wm;
+.parameter init
+.parameter set :since '{since}'
+{match}
+PRAGMA query_only=ON;
+SELECT c.jid AS chat_jid, c.name AS chat_name, m.id, m.sender, m.is_from_me,
+       datetime(m.timestamp) AS utc, m.content, m.media_type, m.filename,
+       COALESCE(NULLIF(ct.full_name,''), NULLIF('~'||ct.push_name,'~')) AS sender_name,
+       (SELECT json_group_array(json_object('sender', r.sender, 'is_from_me', r.is_from_me, 'emoji', r.emoji))
+          FROM reactions r WHERE r.message_id = m.id AND r.chat_jid = m.chat_jid) AS reactions_json
+FROM chats c
+LEFT JOIN messages m ON m.chat_jid = c.jid AND datetime(m.timestamp) > datetime(:since)
+LEFT JOIN wm.whatsmeow_lid_map lm ON lm.lid = m.sender
+LEFT JOIN wm.whatsmeow_contacts ct ON ct.their_jid = COALESCE(lm.pn, m.sender) || '@s.whatsapp.net'
+WHERE {where}
+ORDER BY m.timestamp LIMIT 200;
+"""
+        rows = ssh_sqlite(f"{WA_DIR}/messages.db", sql)
+        msgs = [{
+            "key": f"whatsapp:{r['chat_jid']}:{r['id']}",
+            "time": local_iso(datetime.strptime(r["utc"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()),
+            "ts": datetime.strptime(r["utc"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp(),
+            "sender_jid": r["sender"],
+            "sender": "Peter" if r["is_from_me"] else (r["sender_name"] or f"unresolved WhatsApp sender {r['sender']}"),
+            "is_from_me": bool(r["is_from_me"]),
+            "text": clip(r["content"]),
+            "media": r["media_type"] or None,
+            "filename": r["filename"] or None,
+            "reactions": [{"by": "Peter" if x["is_from_me"] else f"WhatsApp sender {x['sender']}",
+                           "is_from_me": bool(x["is_from_me"]), "emoji": x["emoji"]}
+                          for x in json.loads(r.get("reactions_json") or "[]")] or None,
+        } for r in rows if r.get("id")]
+        out.append({"chat": g["label"], "found": bool(rows),
+                    "chat_jid": rows[0]["chat_jid"] if rows else None, "messages": msgs})
+    return {"items": out}
+
+
+def drive_search(acct, query, cap):
+    data = run_json(["gog", "--json", "drive", "search", "--account", acct, "--max", str(cap),
+                     "--raw-query", query], timeout=60)
+    return data.get("files") or [], bool(data.get("nextPageToken"))
+
+
+def doc_url(doc_id, comment_id=None):
+    return f"https://docs.google.com/document/d/{doc_id}/edit" + (f"?disco={comment_id}" if comment_id else "")
+
+
+def src_gdocs(wm):
+    """New comments and replies on Google Docs the Forethought account can see, plus Docs newly
+    shared with it. Candidates are Docs modified or viewed recently, sticky Docs (Peter has
+    commented or been mentioned there) and the watch list: a new comment doesn't always move a
+    Doc's modifiedTime, so a search on that alone misses some."""
+    cfg = CONFIG["gdocs"]
+    acct = cfg["account"]
+    me = re.compile("|".join(re.escape(e) for e in cfg["my_emails"]), re.I)
+    cutoff = (now() - timedelta(days=cfg["lookback_days"])).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    base = "mimeType='application/vnd.google-apps.document' and trashed=false"
+    recent = f"(modifiedTime > '{cutoff}' or viewedByMeTime > '{cutoff}')"
+    with cf.ThreadPoolExecutor(max_workers=3) as pool:
+        f_active = pool.submit(drive_search, acct, f"{base} and {recent}", cfg["max_candidates"])
+        f_owned = pool.submit(drive_search, acct, f"{base} and 'me' in owners and {recent}", 1000)
+        f_shared = pool.submit(drive_search, acct, f"{base} and sharedWithMe", 1000)
+        active, truncated = f_active.result()
+        owned = {f["id"] for f in f_owned.result()[0]}
+        shared = f_shared.result()[0]
+
+    first_run = not GDOCS_STATE.exists()
+    gstate = json.loads(GDOCS_STATE.read_text()) if not first_run else {"sticky": {}, "shares": {}}
+    watch = {w["id"]: w["label"] for w in cfg.get("watch", [])}
+    docs = {f["id"]: f["name"] for f in active}
+    for doc_id, name in list(gstate["sticky"].items()) + list(watch.items()):
+        docs.setdefault(doc_id, name)
+
+    # A share is new until the watermark moves past the run that first saw it, so a briefing
+    # gather (which never commits) doesn't swallow it. The first run seeds without reporting.
+    new_shares = []
+    for f in shared:
+        seen = gstate["shares"].setdefault(f["id"], {"seen_at_wm": 0 if first_run else wm})
+        if seen["seen_at_wm"] >= wm:
+            new_shares.append({"key": f"gdoc-share:{f['id']}", "doc": f["name"], "link": doc_url(f["id"])})
+
+    def ts(s):
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if s else 0
+
+    def comments(doc_id):
+        try:
+            data = run_json(["gog", "--json", "drive", "comments", "list", doc_id, "--account", acct,
+                             "--all", "--include-quoted"], timeout=60)
+            return doc_id, data.get("comments") or [], None
+        except Exception as exc:
+            return doc_id, [], str(exc)[:200]
+
+    items, other, errors = [], 0, []
+    with cf.ThreadPoolExecutor(max_workers=cfg["workers"]) as pool:
+        for doc_id, cs, err in pool.map(comments, docs):
+            if err:
+                errors.append({"doc": docs[doc_id], "error": err})
+                continue
+            for c in cs:
+                thread = [c] + [r for r in c.get("replies") or [] if r.get("content") or r.get("action")]
+                mine = [m for m in thread if (m.get("author") or {}).get("me")]
+                mentioned = [m for m in thread if me.search(m.get("content") or "")]
+                if mine or mentioned:
+                    gstate["sticky"][doc_id] = docs[doc_id]
+                if ts(c.get("modifiedTime")) <= wm:
+                    continue
+                new = [m for m in thread if ts(m.get("createdTime")) > wm and not (m.get("author") or {}).get("me")]
+                if not new:
+                    continue
+                reasons = []
+                if any(me.search(m.get("content") or "") for m in new):
+                    reasons.append("mentions you")
+                if mine:
+                    reasons.append("your thread")
+                if doc_id in owned:
+                    reasons.append("your doc")
+                if doc_id in watch:
+                    reasons.append("watched doc")
+                if not reasons:
+                    other += 1
+                    continue
+                last = thread[-1]
+                items.append({
+                    "key": f"gdoc:{doc_id}:{c['id']}:{max(m.get('createdTime') or '' for m in new)}",
+                    "doc": docs[doc_id],
+                    "link": doc_url(doc_id, c["id"]),
+                    "reasons": reasons,
+                    "for_peter": reasons != ["watched doc"],
+                    "resolved": bool(c.get("resolved")),
+                    "quoted": clip(((c.get("quotedFileContent") or {}).get("value")), 200),
+                    "awaiting_peter": not (last.get("author") or {}).get("me") and reasons != ["watched doc"],
+                    "thread": [{
+                        "author": "Peter" if (m.get("author") or {}).get("me") else (m.get("author") or {}).get("displayName"),
+                        "time": local_iso(ts(m.get("createdTime"))),
+                        "text": clip(m.get("content") or f"[{m.get('action')}]", GDOC_TEXT_LEN),
+                        "new": m in new,
+                    } for m in thread[-GDOC_THREAD_TAIL:]],
+                })
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    GDOCS_STATE.write_text(json.dumps(gstate, indent=1, ensure_ascii=False))
+    items.sort(key=lambda i: (not i["for_peter"], i["thread"][-1]["time"]))
+    return {"items": items, "new_shares": new_shares, "other_new_threads": other,
+            "docs_checked": len(docs) - len(errors), "doc_errors": errors[:5],
+            "doc_error_count": len(errors), "candidates_truncated": truncated, "first_run": first_run,
+            "_doc_names": sorted(docs.values()), "_shared_names": [f["name"] for f in shared]}
+
+
+def docs_notification_covered(entry, gdocs):
+    """Whether the Docs source covers a Docs notification email: its title (Gmail subjects
+    truncate it with "...") matches a Doc the source checked."""
+    if not gdocs or gdocs.get("status") != "ok":
+        return False
+    subject = entry.get("subject") or ""
+    m = re.match(r'Document shared with you: "(.+)"$', subject)
+    if m:
+        return m.group(1) in gdocs["_shared_names"]
+    if "(Google Docs)" not in (entry.get("from") or "") and not (entry.get("from") or "").startswith("Google Docs"):
+        return False
+    title = subject.split(" - ")[0]
+    if title.endswith("..."):
+        prefix = title[:-3].rstrip()
+        return any(n.startswith(prefix) for n in gdocs["_doc_names"])
+    return title in gdocs["_doc_names"]
+
+
+def reconcile_docs_notifications(gmail, gdocs):
+    """Offer Docs notification emails as noise only when the Docs source covered them. An
+    uncovered one that is new since the last run goes back into the Gmail items."""
+    if gmail.get("status") != "ok":
+        return
+    noise = []
+    for n in gmail["noise"]:
+        if n.pop("covered_by", None) != "gdocs" or docs_notification_covered(n, gdocs):
+            noise.append(n)
+        elif n.pop("new", False):
+            gmail["items"].append(dict(n, reason=None, note="Docs notification the Docs check didn't cover"))
+    for n in noise:
+        n.pop("new", None)
+    gmail["noise"] = noise
+
+
+def src_linear(wm):
+    since = datetime.fromtimestamp(wm).astimezone().isoformat(timespec="seconds")
+    changes = run_json([str(LINEAR_TASKS), "changes", "--since", since, "--json"])
+    mine = run_json([str(LINEAR_TASKS), "list", "--who", "peter", "--json"])
+    nobody = run_json([str(LINEAR_TASKS), "list", "--who", "none", "--json"])
+    today = now().date().isoformat()
+    items, own = [], 0
+    for t in changes.get("tasks") or []:
+        t["key"] = f"linear:{t['id']}:{t.get('last_edited_time')}"
+        # A task Peter asked for himself, with no comment from anyone else, is not news to him.
+        if (t.get("created_since") and t.get("requested_by") == ["Peter"]
+                and all(c["author"] == "Peter" for c in t.get("comments") or [])):
+            own += 1
+            continue
+        items.append(t)
+    # A Waiting task is blocked on someone else, so its due date isn't Peter's to miss.
+    due = [t for t in mine if t.get("due") and t["due"] <= today and not t.get("closed")
+           and t.get("status") != "Waiting"]
+    return {"items": items, "own_new_tasks_skipped": own, "my_open_count": len(mine),
+            "my_due_today_or_overdue": due,
+            "unassigned": [{k: t.get(k) for k in ("id", "title", "project", "status", "due", "url")}
+                           for t in nobody]}
+
+
+def src_calendar(wm):
+    cfg = CONFIG["calendar"]
+    data = run_json(["gog", "--json", "cal", "events", cfg["calendar_id"], "--from", "today",
+                     "--days", "2", "--account", cfg["account"], "--max", "100"])
+
+    def ts(s):
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if s else 0
+
+    def self_attendee(e):
+        return next((a for a in e.get("attendees") or [] if a.get("self")), None)
+
+    def when(d):
+        return d.get("date") if "date" in d and "dateTime" not in d else local_iso(ts(d.get("dateTime")))
+
+    items = []
+    for e in data.get("events") or []:
+        if e.get("status") == "cancelled":
+            continue
+        start, end = e.get("start") or {}, e.get("end") or {}
+        all_day = "date" in start and "dateTime" not in start
+        me = self_attendee(e)
+        items.append({
+            "key": f"cal:{e.get('id')}:{e.get('updated')}",
+            "summary": e.get("summary"),
+            "start": when(start),
+            "end": when(end),
+            "all_day": all_day,
+            "my_response": me.get("responseStatus") if me else ("organiser" if (e.get("organizer") or {}).get("self") else None),
+            "organizer": (e.get("organizer") or {}).get("email"),
+            "attendee_count": len(e.get("attendees") or []),
+            "new_since_last_run": ts(e.get("created")) > wm,
+            "changed_since_last_run": ts(e.get("updated")) > wm,
+            "meet": e.get("hangoutLink"),
+            "link": e.get("htmlLink"),
+        })
+
+    # Invitations: unanswered events up to a year ahead, one row per recurring series with its
+    # first upcoming occurrence. Each is shown once as new, then once more as a reminder if still
+    # unanswered `invite_reminder_days` before it starts; after that it stays silent. `commit`
+    # records both showings in state. Series Peter chose to ignore never appear.
+    lead = cfg.get("invite_reminder_days", 21)
+    remind_from = (now() + timedelta(days=lead)).date().isoformat()
+    state = load_state()
+    ignored = set(state.get("ignored_invites", []))
+    seen = state.get("invites_seen", {})
+    # Invitations that reach Peter through a group in auto_decline_groups are declined by
+    # `decline-invites`, not shown. Gather only lists them.
+    decline_groups = {g.lower() for g in cfg.get("auto_decline_groups", [])}
+    exempt = set(state.get("decline_exempt", []))
+    to_decline = {}
+    ahead = run_json(["gog", "--json", "cal", "events", cfg["calendar_id"], "--from", "today",
+                      "--days", str(INVITE_LOOKAHEAD_DAYS), "--account", cfg["account"],
+                      "--max", "2500", "--all-pages"])
+    series, silent, marks, titles = {}, set(), {}, set()
+    for e in ahead.get("events") or []:
+        me = self_attendee(e)
+        if e.get("status") == "cancelled" or not me or me.get("responseStatus") != "needsAction":
+            continue
+        sid = e.get("recurringEventId") or e.get("id")
+        titles.add(e.get("summary") or "")
+        via = sorted({(a.get("email") or "").lower() for a in e.get("attendees") or []} & decline_groups)
+        if via and sid not in exempt and ts((e.get("end") or {}).get("dateTime")) > now().timestamp():
+            to_decline.setdefault(sid, {
+                "event_id": sid, "summary": e.get("summary"),
+                "first_start": when(e.get("start") or {}),
+                "recurring": bool(e.get("recurringEventId")), "via": via,
+                "organizer": (e.get("organizer") or {}).get("email"), "link": e.get("htmlLink"),
+            })
+            continue
+        if f"cal-invite:{sid}" in ignored or sid in silent:
+            continue
+        if sid in series:
+            series[sid]["occurrences"] += 1
+            continue
+        start = when(e.get("start") or {})
+        soon = start[:10] <= remind_from
+        if sid not in seen:
+            kind = "new"
+            marks[sid] = "reminded" if soon else "shown"  # a new invitation already close needs no second showing
+        elif soon and not seen[sid].get("reminded"):
+            kind = "reminder"
+            marks[sid] = "reminded"
+        else:
+            silent.add(sid)
+            continue
+        series[sid] = {
+            "key": f"cal-invite:{sid}",
+            "kind": kind,
+            "summary": e.get("summary"),
+            "first_start": start,
+            "end": when(e.get("end") or {}),
+            "recurring": bool(e.get("recurringEventId")),
+            "occurrences": 1,
+            "organizer": (e.get("organizer") or {}).get("email"),
+            "location": e.get("location"),
+            "description": clip(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", e.get("description") or "")).strip(), 300) or None,
+            "link": e.get("htmlLink"),
+        }
+    rows = sorted(series.values(), key=lambda i: i["first_start"])
+    return {"items": items, "window": "today and tomorrow",
+            "invitations": [r for r in rows if r["kind"] == "new"],
+            "invitation_reminders": [r for r in rows if r["kind"] == "reminder"],
+            "invitations_window_days": INVITE_LOOKAHEAD_DAYS, "reminder_days": lead,
+            "to_decline": sorted(to_decline.values(), key=lambda i: i["first_start"]),
+            "unanswered_titles": sorted(titles), "_invite_marks": marks}
+
+
+def src_repos(wm):
+    since = datetime.fromtimestamp(wm).astimezone().isoformat(timespec="seconds")
+    mine = set(CONFIG["my_git_names"])
+    out = []
+    for rel in CONFIG["repos"]:
+        path = ROOT / rel
+        entry = {"repo": rel if rel != "." else ROOT.name}
+        try:
+            run(["git", "-C", str(path), "fetch", "--quiet", "origin"], timeout=30)
+            log = run(["git", "-C", str(path), "log", "origin/main", f"--since={since}",
+                       "--format=%h%x09%an%x09%aI%x09%s"], timeout=15)
+            commits = []
+            for line in log.splitlines():
+                h, author, when, subject = line.split("\t", 3)
+                if author not in mine:
+                    commits.append({"key": f"git:{rel}:{h}", "hash": h, "author": author,
+                                    "time": when, "subject": subject})
+            entry["commits"] = commits
+        except Exception as exc:
+            entry["error"] = str(exc)[:300]
+        out.append(entry)
+    return {"items": out}
+
+
+SOURCES = {
+    "gmail": src_gmail,
+    "slack_forethought": lambda wm: src_slack("forethought", wm),
+    "slack_secondws": lambda wm: src_slack("secondws", wm),
+    "slack_todos": src_slack_todos,
+    "signal": src_signal,
+    "whatsapp": src_whatsapp,
+    "gdocs": src_gdocs,
+    "linear": src_linear,
+    "calendar": src_calendar,
+    "repos": src_repos,
+}
+
+
+# --- commands --------------------------------------------------------------
+
+def drop_closed(result, closed):
+    """Remove entries whose key Peter has marked done (handles nested lists)."""
+    def walk(obj):
+        if isinstance(obj, list):
+            return [walk(x) for x in obj if not (isinstance(x, dict) and x.get("key") in closed)]
+        if isinstance(obj, dict):
+            return {k: walk(v) for k, v in obj.items()}
+        return obj
+    return walk(result)
+
+
+def cmd_gather(args):
+    state = load_state()
+    started = now()
+    default_wm = (started - timedelta(hours=CONFIG["first_run_lookback_hours"])).timestamp()
+    override = parse_when(args.since).timestamp() if args.since else None
+    wms = {name: override or state["watermarks"].get(name, default_wm) for name in SOURCES}
+    closed = {k for k, v in state["items"].items() if v.get("status") == "done"}
+
+    results = {}
+    t0 = time.monotonic()
+
+    def one(name):
+        s = time.monotonic()
+        try:
+            res = SOURCES[name](wms[name])
+            res["status"] = "ok"
+        except Exception as exc:
+            res = {"status": "error", "error": f"{type(exc).__name__}: {str(exc)[:400]}"}
+        res["since"] = local_iso(wms[name])
+        res["seconds"] = round(time.monotonic() - s, 1)
+        return name, res
+
+    with cf.ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+        for name, res in pool.map(one, SOURCES):
+            results[name] = drop_closed(res, closed)
+
+    reconcile_docs_notifications(results["gmail"], results["gdocs"])
+    for key in ("_doc_names", "_shared_names"):
+        results["gdocs"].pop(key, None)
+    invite_marks = results["calendar"].pop("_invite_marks", {})
+    with state_lock():
+        state = load_state()  # afresh: the page may have closed or added items while the sources were read
+        if results["gmail"]["status"] == "ok":
+            state["noise_offered"] = [n["thread_id"] for n in results["gmail"]["noise"]]
+        filed = []
+        if args.mode != "briefing" and results["signal"]["status"] == "ok":
+            filed = file_signal_attachments(results["signal"], state)
+
+        open_items = []
+        for key, it in state["items"].items():
+            if it.get("status") == "open":
+                open_items.append(it)
+            elif it.get("status") == "snoozed" and parse_when(it["until"]) <= started:
+                it["status"] = "open"
+                open_items.append(it)
+        save_state(state)
+    carried = carried_over(state, open_items) if args.mode != "briefing" else []
+
+    doc = {
+        "mode": args.mode,
+        "started_at": started.isoformat(timespec="seconds"),
+        "elapsed_seconds": round(time.monotonic() - t0, 1),
+        "since_override": bool(override),
+        "sources": results,
+        "filed_attachments": filed,
+        "open_items": open_items,
+        "carried_over": carried,
+    }
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LAST_GATHER.write_text(json.dumps({
+        "mode": args.mode, "started_at": started.timestamp(), "since_override": bool(override),
+        "ok": [n for n, r in results.items() if r["status"] == "ok"],
+        "invite_marks": invite_marks,
+        "to_decline": results["calendar"].get("to_decline", []),
+    }))
+    print(json.dumps(doc, indent=1, ensure_ascii=False))
+
+
+def carried_over(state, open_items):
+    """Last run's Urgent and New items that Peter hasn't resolved and that aren't open items.
+
+    Once the watermarks move past them, no source returns them again, so each run decides afresh
+    whether each still needs Peter (and becomes an open item) or can go.
+    """
+    desk = load_json(STATE_DIR / "desk" / "desk.json", {})
+    skip = {it["key"] for it in open_items} | {k for k, v in state["items"].items() if v.get("status") in ("done", "snoozed")}
+    skip |= set(load_json(STATE_DIR / "desk" / "archived.json", []))
+    started = {k for t in load_json(STATE_DIR / "desk" / "tasks.json", []) for k in t.get("keys") or []}
+    out = []
+    for sec in desk.get("sections", []):
+        if sec.get("id") not in ("urgent", "new"):
+            continue
+        for g in sec.get("groups") or []:
+            for it in g.get("items") or []:
+                key = it.get("key")
+                if not key or key in skip:
+                    continue
+                skip.add(key)
+                out.append({"key": key, "section": sec["id"], "source": it.get("source", ""), "head": it.get("head", ""),
+                            "text": it.get("text", ""), "link": it.get("link", ""), "context": it.get("context", ""),
+                            "started_in_tab": key in started, "shown_in": desk.get("header", {}).get("title", "")})
+    return out
+
+
+def load_json(path, default):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def cmd_commit(_args):
+    if not LAST_GATHER.exists():
+        sys.exit("No gather to commit.")
+    last = json.loads(LAST_GATHER.read_text())
+    if last["mode"] == "briefing":
+        sys.exit("Last gather was briefing mode; watermarks stay put.")
+    if last.get("since_override"):
+        sys.exit("Last gather used --since; watermarks stay put.")
+    with state_lock():
+        state = load_state()
+        for name in last["ok"]:
+            state["watermarks"][name] = last["started_at"]
+        seen = state.setdefault("invites_seen", {})
+        shown_on = datetime.fromtimestamp(last["started_at"]).date().isoformat()
+        for sid, mark in (last.get("invite_marks") or {}).items():
+            rec = seen.setdefault(sid, {"shown": shown_on})
+            if mark == "reminded":
+                rec["reminded"] = shown_on
+        save_state(state)
+    LAST_GATHER.unlink()
+    print(f"Watermarks advanced to {local_iso(last['started_at'])} for: {', '.join(last['ok'])}")
+
+
+def cmd_items(args):
+    if args.action in (None, "list"):
+        rows = [v for v in load_state()["items"].values() if v.get("status") in ("open", "snoozed")]
+        print(json.dumps(rows, indent=1, ensure_ascii=False))
+        return
+    with state_lock():
+        change_items(args)
+
+
+def change_items(args):
+    state = load_state()
+    items = state["items"]
+    if args.action == "add":
+        if len(args.rest) < 2:
+            sys.exit("items add KEY SUMMARY")
+        key, summary = args.rest[0], " ".join(args.rest[1:])
+        items[key] = {"key": key, "summary": summary, "source": args.source, "link": args.link,
+                      "added": now().isoformat(timespec="minutes"), "status": "open"}
+        print(f"Open: {key}")
+    elif args.action == "done":
+        for key in args.rest:
+            items.setdefault(key, {"key": key})
+            items[key].update(status="done", closed=now().isoformat(timespec="minutes"))
+        print(f"Done: {', '.join(args.rest)}")
+    elif args.action == "snooze":
+        if len(args.rest) != 2:
+            sys.exit("items snooze KEY UNTIL")
+        key, until = args.rest
+        items.setdefault(key, {"key": key})
+        items[key].update(status="snoozed", until=parse_until(until).isoformat(timespec="minutes"))
+        print(f"Snoozed {key} until {items[key]['until']}")
+    # Keep done items for two weeks so their keys stay suppressed, then forget them.
+    cutoff = (now() - timedelta(days=14)).isoformat()
+    state["items"] = {k: v for k, v in items.items()
+                      if not (v.get("status") == "done" and v.get("closed", "9") < cutoff)}
+    save_state(state)
+
+
+def safe_name(text):
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text)
+    text = re.sub(r"-+\.", ".", text).strip("-.")
+    return text[:120] or "file"
+
+
+def file_into_inbox(src, sender, date, filename=None):
+    """Move a file into inbox/files/. Returns (destination, archive listing lines)."""
+    filename = safe_name(filename or src.name)
+    base = f"{date}--{safe_name(sender).lower()}--{filename}"
+    files = INBOX / "files"
+    is_archive = zipfile.is_zipfile(src) or tarfile.is_tarfile(src)
+    stem = re.sub(r"(\.tar)?\.(zip|tgz|gz|tar|bz2|xz)$", "", base) if is_archive else base
+    n = 1
+    target = files / stem
+    while target.exists():
+        n += 1
+        target = files / (f"{stem}-{n}" if is_archive else re.sub(r"(\.[^.]+)?$", rf"-{n}\g<1>", stem, 1))
+    if is_archive:
+        target.mkdir(parents=True)
+        dest = target / filename
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        dest = target
+    shutil.move(str(src), dest)
+    lines = []
+    if is_archive:
+        if zipfile.is_zipfile(dest):
+            with zipfile.ZipFile(dest) as z:
+                names = [f"{i.filename}  ({i.file_size} B)" for i in z.infolist()]
+        else:
+            with tarfile.open(dest) as t:
+                names = [f"{m.name}  ({m.size} B)" for m in t.getmembers()]
+        shown = [n for n in names if "/.git/" not in n and not n.startswith(".git/")]
+        hidden = len(names) - len(shown)
+        lines.append(f"Archive contents ({len(names)} entries; not extracted):")
+        lines += ["  " + n for n in shown[:100]]
+        if len(shown) > 100:
+            lines.append(f"  … {len(shown) - 100} more")
+        if hidden:
+            lines.append(f"  ({hidden} .git entries not listed: the archive includes a git repository)")
+    return dest, lines
+
+
+def cmd_file_attachment(args):
+    src = Path(args.path).expanduser()
+    if not src.is_file() or src.is_symlink():
+        sys.exit(f"Not a regular file: {src}")
+    dest, lines = file_into_inbox(src, args.sender, args.date or now().date().isoformat())
+    print(f"Filed: {dest}")
+    for line in lines:
+        print(line)
+
+
+def add_readme_row(dest, filename, sender, channel, date):
+    readme = INBOX / "README.md"
+    text = readme.read_text()
+    rel = dest.relative_to(INBOX)
+    row = (f"- [ ] [{safe_name(filename)}, from {sender} ({channel}, {date})]({rel}). "
+           f"Filed automatically; not yet described.\n")
+    anchor = "## To read\n"
+    text = text.replace(anchor, anchor + row, 1) if anchor in text else text + "\n" + anchor + row
+    readme.write_text(text)
+
+
+def fetch_kept(path, dest_dir):
+    """Copy one file the Signal bridge kept on bridge-host to dest_dir."""
+    if not path.startswith(SIGNAL_KEEP_DIR) or not KEPT_NAME.match(path[len(SIGNAL_KEEP_DIR):]):
+        raise ValueError(f"unexpected stored_path: {path!r}")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    local = dest_dir / path[len(SIGNAL_KEEP_DIR):]
+    with open(local, "wb") as fh:
+        proc = subprocess.run(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "bridge-host",
+                               "cat -- " + shlex.quote(path)], stdout=fh, stderr=subprocess.PIPE, timeout=180)
+    if proc.returncode != 0:
+        local.unlink(missing_ok=True)
+        raise RuntimeError(f"copy failed: {proc.stderr.decode()[:200]}")
+    return local
+
+
+def file_signal_attachments(signal_result, state):
+    """File every inbound attachment the bridge kept that is not yet in the inbox."""
+    done = state.setdefault("filed", {})
+    filed = []
+    for msg in signal_result.get("items") or []:
+        if msg["is_from_me"]:
+            continue
+        for n, att in enumerate(msg.get("attachments") or []):
+            if att.get("download_status") != "stored":
+                continue
+            fkey = f"{msg['key']}:{n}"
+            if fkey in done:
+                att["filed_path"] = done[fkey]
+                continue
+            try:
+                local = fetch_kept(att["stored_path"], STATE_DIR / "incoming")
+                original = local.name.split("--", 2)[2]
+                sender = msg["author"] if not msg["author"].startswith("unresolved") else "unknown sender"
+                date = msg["time"][:10]
+                dest, lines = file_into_inbox(local, sender.split()[0], date, original)
+                add_readme_row(dest, original, sender, f"Signal, {msg['conversation']}", date)
+                rel = str(dest.relative_to(ROOT))
+                done[fkey] = rel
+                att["filed_path"] = rel
+                filed.append({"key": fkey, "path": rel, "from": sender, "filename": original,
+                              "time": msg["time"], "archive_listing": lines[:40] or None})
+            except Exception as exc:
+                att["filing_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    return filed
+
+
+def sam_window(rows, is_new):
+    """Mark new rows, and keep only SAM_CONTEXT rows before the first new one."""
+    first = next((i for i, r in enumerate(rows) if is_new(r)), len(rows))
+    return rows[max(0, first - SAM_CONTEXT):], first == 0 and len(rows) >= SAM_SCAN
+
+
+def sam_signal(wm_ms, last):
+    if not SIGNAL_ID.match(SAM_DM):
+        raise ValueError(f"config has a malformed Signal ID: {SAM_DM!r}")
+    sql = f""".bail on
+.parameter init
+.parameter set :c '{SAM_DM}'
+PRAGMA query_only=ON;
+SELECT account_id, conversation_id, author_id, is_from_me, sent_at_ms, body,
+       unavailable_content, reply_author_id, reply_sent_at_ms, attachments_json,
+       reactions_json, peter_reacted, sent_by_agent
+FROM messages_with_reactions
+WHERE conversation_id = :c
+ORDER BY sent_at_ms DESC LIMIT {SAM_SCAN};
+"""
+    rows = [r for r in reversed(ssh_sqlite(SIGNAL_DB, sql))
+            if not (r.get("unavailable_content") == "reaction" and not r.get("body"))]
+    sam = [r for r in rows if not r["is_from_me"]]
+    new = sam[-last:] if last else [r for r in sam if r["sent_at_ms"] > wm_ms]
+    keys = {(r["author_id"], r["sent_at_ms"]) for r in new}
+    window, truncated = sam_window(rows, lambda r: (r["author_id"], r["sent_at_ms"]) in keys)
+    convs, people = CONFIG["signal"]["conversations"], CONFIG["signal"]["people"]
+    conversation = []
+    for r in window:
+        item = signal_item(r, convs, people, body_len=None)
+        item["new"] = (r["author_id"], r["sent_at_ms"]) in keys
+        conversation.append(item)
+    with state_lock():
+        state = load_state()
+        filed = file_signal_attachments({"items": [m for m in conversation if m["new"]]}, state)
+        save_state(state)
+    return {"conversation_name": "Signal DM", "new_count": len(new), "scan_truncated": truncated,
+            "conversation": conversation, "filed_attachments": filed,
+            "pending": max((r["sent_at_ms"] for r in new), default=None)}
+
+
+def sam_slack(cid, wm_ts, last):
+    ws, sam_id = SAM["slack_workspace"], SAM["slack_user_id"]
+    me = CONFIG["slack"][ws]["my_user_id"]
+    names = slack_cache_names(ws)
+    hist = slack_json(ws, "history", cid, str(SAM_SCAN))
+    msgs = (hist.get("messages") if isinstance(hist, dict) else hist) or []
+    rows = list(msgs)
+    parents = sorted((m for m in msgs if m.get("reply_count")), key=lambda m: float(m["ts"]), reverse=True)
+    for parent in parents[:10]:
+        if not last and float(parent.get("latest_reply") or 0) <= wm_ts:
+            continue
+        rep = slack_json(ws, "replies", cid, parent["ts"])
+        rows += [r for r in ((rep.get("messages") if isinstance(rep, dict) else rep) or [])
+                 if r["ts"] != parent["ts"]]
+    rows = sorted((m for m in rows if m.get("subtype") not in SLACK_EVENT_SUBTYPES), key=lambda m: float(m["ts"]))
+    sam = [m for m in rows if m.get("user") == sam_id]
+    new = sam[-last:] if last else [m for m in sam if float(m["ts"]) > wm_ts]
+    keys = {m["ts"] for m in new}
+    window, truncated = sam_window(rows, lambda m: m["ts"] in keys)
+
+    def readable(text):
+        return re.sub(r"<@([A-Z0-9]+)>", lambda m: "@" + str(names.get(m.group(1), m.group(1))), text or "")
+
+    conversation = []
+    for m in window:
+        uid = m.get("user") or m.get("bot_id")
+        reactions = [{"emoji": x["name"], "by": [names.get(u, u) for u in x.get("users", [])]}
+                     for x in m.get("reactions") or []]
+        conversation.append({
+            "key": f"slack:{ws}:{cid}:{m['ts']}",
+            "time": local_iso(m["ts"]),
+            "ts": m["ts"],
+            "author": names.get(uid, uid),
+            "is_from_me": uid == me,
+            "text": readable(m.get("text")),
+            "files": [f.get("name") for f in m.get("files") or []] or None,
+            "thread_ts": m.get("thread_ts") if m.get("thread_ts") != m["ts"] else None,
+            "reactions": reactions or None,
+            "peter_reacted": any(me in x.get("users", []) for x in m.get("reactions") or []),
+            "link": f"{CONFIG['slack'][ws]['url']}archives/{cid}/p{m['ts'].replace('.', '')}",
+            "new": m["ts"] in keys,
+        })
+    return {"conversation_name": SAM["slack_channels"][cid], "channel_id": cid,
+            "new_count": len(new), "scan_truncated": truncated, "conversation": conversation,
+            "pending": max((float(m["ts"]) for m in new), default=None)}
+
+
+def cmd_sam(args):
+    """Sam's new messages to Peter on Signal and Slack, with the conversation leading up to them."""
+    pstate = load_sam_state()
+    lookback = now() - timedelta(hours=CONFIG["first_run_lookback_hours"])
+    since = parse_when(args.since) if args.since else None
+    jobs = {"signal": lambda: sam_signal(
+        int(since.timestamp() * 1000) if since else pstate.get("watermark_ms", int(lookback.timestamp() * 1000)),
+        args.last)}
+    for cid in SAM["slack_channels"]:
+        wm = since.timestamp() if since else pstate.get("slack", {}).get(cid, lookback.timestamp())
+        jobs[f"slack:{cid}"] = (lambda c, w: lambda: sam_slack(c, w, args.last))(cid, wm)
+
+    def one(name):
+        try:
+            return name, dict(jobs[name](), status="ok")
+        except Exception as exc:
+            return name, {"status": "error", "error": f"{type(exc).__name__}: {str(exc)[:400]}"}
+
+    with cf.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        sources = dict(pool.map(one, jobs))
+    pstate["pending"] = {name: res.pop("pending") for name, res in sources.items()
+                         if res["status"] == "ok" and res.get("pending")}
+    save_sam_state(pstate)
+    print(json.dumps({
+        "new_count": sum(r.get("new_count", 0) for r in sources.values()),
+        "sources": sources,
+    }, indent=1, ensure_ascii=False))
+
+
+def cmd_sam_commit(_args):
+    pstate = load_sam_state()
+    pending = pstate.pop("pending", None)
+    if not pending:
+        sys.exit("No new Sam messages to mark handled.")
+    for name, mark in pending.items():
+        if name == "signal":
+            pstate["watermark_ms"] = max(mark, pstate.get("watermark_ms", 0))
+        else:
+            slack = pstate.setdefault("slack", {})
+            cid = name.split(":", 1)[1]
+            slack[cid] = max(mark, slack.get(cid, 0))
+    save_sam_state(pstate)
+    print(f"Marked handled: {', '.join(sorted(pending))}.")
+
+
+def cmd_archive(args):
+    state = load_state()
+    offered = set(state.get("noise_offered", []))
+    acct = CONFIG["gmail"]["account"]
+    failed = False
+    for tid in args.thread_ids:
+        if not GMAIL_THREAD_ID.match(tid):
+            print(f"Refused {tid}: not a Gmail thread ID")
+        elif tid not in offered and not args.judged:
+            print(f"Refused {tid}: not in the last noise list (use --judged only for a thread Peter approved)")
+        else:
+            try:  # one failed thread mustn't stop the rest; the desk server reads each line's thread ID
+                run(["gog", "gmail", "thread", "modify", tid, "--remove", "INBOX", "--account", acct])
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                failed = True
+                print(f"Error archiving {tid}: {str(exc)[:200]}")
+                continue
+            print(f"Archived {tid}")
+    if failed:
+        sys.exit(1)
+
+
+def cmd_keep(args):
+    with state_lock():
+        state = load_state()
+        kept = state.setdefault("noise_kept", [])
+        kept += [t for t in args.thread_ids if t not in kept]
+        save_state(state)
+    print(f"Won't offer again: {', '.join(args.thread_ids)}")
+
+
+def cmd_ignore_invite(args):
+    bad = [k for k in args.keys if not k.startswith("cal-invite:")]
+    if bad:
+        sys.exit(f"Not invitation keys (cal-invite:<series id>): {', '.join(bad)}")
+    with state_lock():
+        state = load_state()
+        ignored = state.setdefault("ignored_invites", [])
+        ignored += [k for k in args.keys if k not in ignored]
+        save_state(state)
+    print(f"Won't flag again: {', '.join(args.keys)}")
+
+
+def respond(event_id, status):
+    cfg = CONFIG["calendar"]
+    run(["gog", "cal", "respond", cfg["calendar_id"], event_id, "--status", status,
+         "--account", cfg["account"]])
+
+
+def cmd_decline_invites(_args):
+    if not LAST_GATHER.exists():
+        sys.exit("No gather to act on.")
+    last = json.loads(LAST_GATHER.read_text())
+    if last["mode"] == "briefing":
+        sys.exit("Last gather was briefing mode; nothing declined.")
+    with state_lock():
+        decline_invites(last)
+
+
+def decline_invites(last):
+    state = load_state()
+    declined = state.setdefault("auto_declined", {})
+    exempt = set(state.get("decline_exempt", []))
+    for ev in last.get("to_decline") or []:
+        eid = ev["event_id"]
+        if eid in exempt:
+            continue
+        try:
+            respond(eid, "declined")
+        except Exception as exc:
+            print(f"Failed {eid} ({ev['summary']}): {str(exc)[:200]}")
+            continue
+        declined[eid] = {"summary": ev["summary"], "first_start": ev["first_start"],
+                         "via": ev["via"], "declined_at": now().isoformat(timespec="seconds")}
+        save_state(state)
+        print(f"Declined {eid}: {ev['summary']} ({ev['first_start']}, via {', '.join(ev['via'])})")
+
+
+def cmd_undo_decline(args):
+    with state_lock():
+        undo_decline(args)
+
+
+def undo_decline(args):
+    state = load_state()
+    exempt = state.setdefault("decline_exempt", [])
+    for eid in args.event_ids:
+        respond(eid, args.status)
+        if eid not in exempt:
+            exempt.append(eid)
+        state.get("auto_declined", {}).pop(eid, None)
+        save_state(state)
+        print(f"Set {eid} to {args.status}; it won't be declined again")
+
+
+PUBLICATION_SCRIPT = Path(__file__).resolve().parent / "publication.mjs"
+FT_PUBLISH = cfg_path("ft_publish")
+
+
+def cmd_publication(_args):
+    """Fetch the publication pipeline for the desk page, with ft-publish's credentials (as its ./pub finds them)."""
+    env_file = next((f for f in (Path.home() / ".config/ft-publish/op.env", Path.home() / ".config/ft-publish/.env",
+                                 FT_PUBLISH / "op.env") if f.exists()), None)
+    if not env_file:
+        sys.exit("No ft-publish credentials: see the ft-publish skill's SETUP.md")
+    out = STATE_DIR / "desk" / "publication.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp")
+    node = ["node", str(PUBLICATION_SCRIPT), str(tmp), PUBLICATION_VIEWER, str(cfg_path("publication_project_js"))]
+    cmd = ["op", "run", "--env-file", str(env_file), "--", *node] if "op://" in env_file.read_text() else node
+    env = None
+    if cmd[0] == "node":  # a plain KEY=value file, for operators without 1Password
+        import os
+        env = dict(os.environ)
+        for line in env_file.read_text().splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"\'')
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
+    if r.returncode:
+        sys.exit(f"Publication not updated: {(r.stderr or r.stdout).strip().splitlines()[-1:] or ['no output']}")
+    tmp.replace(out)
+    print(r.stdout.strip())
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    g = sub.add_parser("gather")
+    g.add_argument("--mode", choices=["standalone", "briefing"], default="standalone")
+    g.add_argument("--since")
+    sub.add_parser("commit")
+    it = sub.add_parser("items")
+    it.add_argument("action", nargs="?", choices=["list", "add", "done", "snooze"])
+    it.add_argument("rest", nargs="*")
+    it.add_argument("--source")
+    it.add_argument("--link")
+    fa = sub.add_parser("file-attachment")
+    fa.add_argument("path")
+    fa.add_argument("--sender", required=True)
+    fa.add_argument("--date")
+    ar = sub.add_parser("archive")
+    ar.add_argument("thread_ids", nargs="+")
+    ar.add_argument("--judged", action="store_true")
+    kp = sub.add_parser("keep")
+    kp.add_argument("thread_ids", nargs="+")
+    ig = sub.add_parser("ignore-invite")
+    ig.add_argument("keys", nargs="+")
+    sub.add_parser("decline-invites")
+    ud = sub.add_parser("undo-decline")
+    ud.add_argument("event_ids", nargs="+")
+    ud.add_argument("--status", choices=["accepted", "tentative", "needsAction"], default="needsAction")
+    pb = sub.add_parser("sam")
+    pbw = pb.add_mutually_exclusive_group()
+    pbw.add_argument("--since")
+    pbw.add_argument("--last", type=int)
+    sub.add_parser("sam-commit")
+    sub.add_parser("publication")
+    args = p.parse_args()
+    {"gather": cmd_gather, "commit": cmd_commit, "items": cmd_items,
+     "file-attachment": cmd_file_attachment, "archive": cmd_archive,
+     "keep": cmd_keep, "ignore-invite": cmd_ignore_invite, "decline-invites": cmd_decline_invites,
+     "undo-decline": cmd_undo_decline, "sam": cmd_sam, "sam-commit": cmd_sam_commit,
+     "publication": cmd_publication}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

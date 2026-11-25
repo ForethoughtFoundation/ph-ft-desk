@@ -1,0 +1,336 @@
+{
+ "p-research-desk": [
+  {
+   "identifier": "AS-231",
+   "title": "Reading-list trial with Kit on two live questions",
+   "url": "https://linear.app/example/issue/AS-231",
+   "dueDate": "2026-11-26",
+   "priorityLabel": "High",
+   "description": "Kit tries the reading-list view on two questions he is working on and notes what's missing.",
+   "state": {
+    "name": "In Progress",
+    "type": "started"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-233",
+   "title": "Fixes from Kit's trial notes",
+   "url": "https://linear.app/example/issue/AS-233",
+   "dueDate": "2026-11-24",
+   "priorityLabel": "High",
+   "description": "",
+   "state": {
+    "name": "Todo",
+    "type": "unstarted"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-236",
+   "title": "Demo to the research team",
+   "url": "https://linear.app/example/issue/AS-236",
+   "dueDate": "2026-11-27",
+   "priorityLabel": "Medium",
+   "description": "",
+   "state": {
+    "name": "Todo",
+    "type": "unstarted"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-229",
+   "title": "Reading-list export keeps each source's notes",
+   "url": "https://linear.app/example/issue/AS-229",
+   "dueDate": null,
+   "priorityLabel": "Medium",
+   "description": "",
+   "state": {
+    "name": "Done",
+    "type": "completed"
+   },
+   "assignee": {
+    "name": "Sam Lee",
+    "displayName": "Sam Lee"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-238",
+   "title": "Search across past reading lists",
+   "url": "https://linear.app/example/issue/AS-238",
+   "dueDate": null,
+   "priorityLabel": "Low",
+   "description": "",
+   "state": {
+    "name": "Backlog",
+    "type": "backlog"
+   },
+   "assignee": null,
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-235",
+   "title": "Ask Noor which formats she exports to",
+   "url": "https://linear.app/example/issue/AS-235",
+   "dueDate": null,
+   "priorityLabel": "Low",
+   "description": "",
+   "state": {
+    "name": "Waiting",
+    "type": "started"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  }
+ ],
+ "p-shared-tooling": [
+  {
+   "identifier": "AS-220",
+   "title": "Add the comment bot to three more docs",
+   "url": "https://linear.app/example/issue/AS-220",
+   "dueDate": null,
+   "priorityLabel": "Medium",
+   "description": "",
+   "state": {
+    "name": "In Progress",
+    "type": "started"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-224",
+   "title": "How-to for adding the comment bot",
+   "url": "https://linear.app/example/issue/AS-224",
+   "dueDate": "2026-11-28",
+   "priorityLabel": "Medium",
+   "description": "",
+   "state": {
+    "name": "Todo",
+    "type": "unstarted"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-226",
+   "title": "Decide whether to keep the old transcript archive",
+   "url": "https://linear.app/example/issue/AS-226",
+   "dueDate": "2026-12-04",
+   "priorityLabel": "No priority",
+   "description": "",
+   "state": {
+    "name": "Triage",
+    "type": "triage"
+   },
+   "assignee": null,
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  }
+ ],
+ "p-metrics": [
+  {
+   "identifier": "AS-240",
+   "title": "Monthly spend check",
+   "url": "https://linear.app/example/issue/AS-240",
+   "dueDate": "2026-12-01",
+   "priorityLabel": "Low",
+   "description": "",
+   "state": {
+    "name": "Todo",
+    "type": "unstarted"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  }
+ ],
+ "p-publication-desk": [
+  {
+   "identifier": "AS-251",
+   "title": "Chase review of the compute essay",
+   "url": "https://linear.app/example/issue/AS-251",
+   "dueDate": "2026-11-23",
+   "priorityLabel": "High",
+   "description": "",
+   "state": {
+    "name": "Todo",
+    "type": "unstarted"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-252",
+   "title": "Schedule Thursday's piece on social",
+   "url": "https://linear.app/example/issue/AS-252",
+   "dueDate": "2026-11-26",
+   "priorityLabel": "Medium",
+   "description": "",
+   "state": {
+    "name": "In Progress",
+    "type": "started"
+   },
+   "assignee": {
+    "name": "Dana Cole",
+    "displayName": "Dana Cole"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  }
+ ],
+ "p-newsletter": [
+  {
+   "identifier": "AS-262",
+   "title": "Draft the first issue",
+   "url": "https://linear.app/example/issue/AS-262",
+   "dueDate": "2026-12-02",
+   "priorityLabel": "Medium",
+   "description": "",
+   "state": {
+    "name": "Todo",
+    "type": "unstarted"
+   },
+   "assignee": {
+    "name": "Peter Hartree",
+    "displayName": "Peter Hartree"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  },
+  {
+   "identifier": "AS-263",
+   "title": "Pick a sending day",
+   "url": "https://linear.app/example/issue/AS-263",
+   "dueDate": null,
+   "priorityLabel": "No priority",
+   "description": "",
+   "state": {
+    "name": "Triage",
+    "type": "triage"
+   },
+   "assignee": null,
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  }
+ ],
+ "p-corpus": [
+  {
+   "identifier": "AS-214",
+   "title": "October corpus refresh",
+   "url": "https://linear.app/example/issue/AS-214",
+   "dueDate": null,
+   "priorityLabel": "Medium",
+   "description": "",
+   "state": {
+    "name": "In Progress",
+    "type": "started"
+   },
+   "assignee": {
+    "name": "Sam Lee",
+    "displayName": "Sam Lee"
+   },
+   "labels": {
+    "nodes": []
+   },
+   "comments": {
+    "nodes": []
+   }
+  }
+ ],
+ "p-podcast": []
+}
